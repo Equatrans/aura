@@ -6,16 +6,17 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 // === КОНФИГУРАЦИЯ SUPABASE ===
 const SUPABASE_URL = 'https://dlvlruldmaomehvcdofx.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRsdmxydWxkbWFvbWVodmNkb2Z4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ0NzQyMDAsImV4cCI6MjA5MDA1MDIwMH0.pwEQNa_yVGAg2SsQn92qyeZlCqF__303eoFxKkNvufA';
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRsdmxydWxkbWFvbWVodmNkb2Z4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ0NzQyMDAsImV4cCI6MjA5MDA1MDIwMH0.pwEQNa_yVGAg2SsQn92qyeZlCqF__303eoFxKkNvufA';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // === Глобальное состояние ===
 let currentChannel = null;
 let myPeerId = 'user-' + Math.random().toString(36).substring(2, 11);
-let myName = 'User_' + Math.random().toString(36).substring(2, 6);
+let myName = localStorage.getItem('p2p_username') || 'User_' + Math.random().toString(36).substring(2, 6);
 let localStream = null;
 const peerConnections = new Map(); // peerId → RTCPeerConnection
+const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2MB лимит
 
 // === DOM элементы ===
 const roomIdInput = document.getElementById('roomIdInput');
@@ -40,6 +41,15 @@ const installBtn = document.getElementById('installBtn');
 // Инициализация имени
 peerNameInput.value = myName;
 
+// Сохранение имени пользователя при изменении
+peerNameInput.addEventListener('change', () => {
+    const newName = peerNameInput.value.trim();
+    if (newName) {
+        myName = newName;
+        localStorage.setItem('p2p_username', myName);
+    }
+});
+
 // ============================================
 // UI ФУНКЦИИ
 // ============================================
@@ -48,8 +58,15 @@ function addMessage(text, peerId = null, isOwn = false) {
     const msgDiv = document.createElement('div');
     msgDiv.className = `message ${isOwn ? 'own' : 'other'}`;
     
+    // XSS защита: экранируем HTML
+    const safeText = text.replace(/&/g, '&amp;')
+                         .replace(/</g, '&lt;')
+                         .replace(/>/g, '&gt;')
+                         .replace(/"/g, '&quot;')
+                         .replace(/'/g, '&#039;');
+    
     const name = isOwn ? 'Вы' : (peerId ? peerId.substring(0, 8) : 'Система');
-    msgDiv.innerHTML = `<strong>${name}:</strong> ${text} <small>${new Date().toLocaleTimeString()}</small>`;
+    msgDiv.innerHTML = `<strong>${name}:</strong> ${safeText} <small>${new Date().toLocaleTimeString()}</small>`;
     
     messagesDiv.appendChild(msgDiv);
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
@@ -163,7 +180,10 @@ joinBtn.addEventListener('click', async () => {
     // Подписка
     const status = await currentChannel.subscribe(async (subStatus, err) => {
         console.log('Subscribe status:', subStatus);
-        if (err) console.error('Subscribe error:', err);
+        if (err) {
+            console.error('Subscribe error:', err);
+            addMessage(`❌ Ошибка подписки: ${err.message || 'Неизвестная ошибка'}`, null, true);
+        }
 
         if (subStatus === 'SUBSCRIBED') {
             console.log('✅ Успешно подключены к Supabase Realtime');
@@ -176,7 +196,28 @@ joinBtn.addEventListener('click', async () => {
             updateUIAfterJoin();
         } else if (subStatus === 'CHANNEL_ERROR' || subStatus === 'TIMED_OUT') {
             addMessage('❌ Ошибка подключения к комнате. Проверьте консоль.', null, true);
+        } else if (subStatus === 'CLOSED') {
+            addMessage('🔴 Соединение закрыто', null, true);
+            updateUIAfterLeave();
         }
+    });
+    
+    // Обработка ошибок подписки
+    status.then(subscription => {
+        subscription.on('error', (error) => {
+            console.error('Realtime connection error:', error);
+            addMessage('⚠️ Ошибка соединения. Попытка переподключения...', null, true);
+            
+            // Автоматическое переподключение через 3 секунды
+            setTimeout(() => {
+                if (!currentChannel && roomIdInput.value.trim()) {
+                    joinBtn.click();
+                }
+            }, 3000);
+        });
+    }).catch(err => {
+        console.error('Subscription setup error:', err);
+        addMessage('❌ Критическая ошибка подключения', null, true);
     });
 });
 
@@ -209,6 +250,13 @@ messageInput.addEventListener('keypress', (e) => {
 sendFileBtn.addEventListener('click', async () => {
     const file = fileInput.files[0];
     if (!file || !currentChannel) return;
+
+    // Проверка размера файла (макс. 2MB)
+    if (file.size > MAX_FILE_SIZE) {
+        addMessage(`❌ Файл слишком большой. Максимальный размер: ${MAX_FILE_SIZE / 1024 / 1024}MB`, null, true);
+        fileInput.value = '';
+        return;
+    }
 
     const reader = new FileReader();
     reader.onload = async (e) => {
@@ -335,6 +383,24 @@ async function createPeerConnection(targetPeerId, isInitiator = false) {
 
     pc.oniceconnectionstatechange = () => {
         console.log('ICE state:', pc.iceConnectionState);
+        
+        // Обработка ошибок WebRTC
+        if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+            console.warn('WebRTC connection failed for peer:', targetPeerId);
+            addMessage('⚠️ Потеряно соединение с участником', null, true);
+            
+            // Удаляем видео элемент
+            const videoElement = document.getElementById(`video-${targetPeerId}`);
+            if (videoElement) {
+                videoElement.closest('.video-wrapper')?.remove();
+            }
+            
+            // Закрываем соединение и удаляем из мапы
+            pc.close();
+            peerConnections.delete(targetPeerId);
+        } else if (pc.iceConnectionState === 'connected') {
+            console.log('✅ WebRTC connection established with:', targetPeerId);
+        }
     };
 
     // Если инициатор - создаём offer

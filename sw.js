@@ -1,20 +1,13 @@
-const CACHE_NAME = 'p2p-messenger-v2';
-const urlsToCache = [
-    '/',
-    '/index.html',
-    '/style.css',
-    '/app.js',
-    '/manifest.json'
-];
-
-// Добавляем иконки только если они существуют (опционально)
-// Проверка в install будет пропускать отсутствующие файлы
+const CACHE_NAME = 'p2p-messenger-v5';
 
 self.addEventListener('install', event => {
     event.waitUntil(
         caches.open(CACHE_NAME)
             .then(cache => {
-                // Пытаемся добавить каждый URL, игнорируя ошибки
+                const urlsToCache = [
+                    './',
+                    './index.html'
+                ];
                 return Promise.allSettled(
                     urlsToCache.map(url => 
                         cache.add(url).catch(err => {
@@ -35,9 +28,8 @@ self.addEventListener('fetch', event => {
                 }
                 return fetch(event.request).catch(err => {
                     console.warn(`Ошибка загрузки ${event.request.url}:`, err);
-                    // Возвращаем fallback-страницу при офлайн-режиме
                     if (event.request.mode === 'navigate') {
-                        return caches.match('/index.html');
+                        return caches.match('./index.html');
                     }
                     throw err;
                 });
